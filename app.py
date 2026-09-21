@@ -18,6 +18,8 @@ Env vars:
 """
 
 import os
+import time
+from collections import deque
 
 import requests
 from flask import Flask, jsonify, render_template_string, request
@@ -57,6 +59,9 @@ QUESTIONS = {
 # If Jev's routing confidence is below this, send the ticket to a human.
 ROUTING_CONFIDENCE_THRESHOLD = 0.60
 
+# Recent triage results, newest first. In-memory: fine for a single instance.
+HISTORY = deque(maxlen=200)
+
 
 def call_jev(state: str) -> dict:
     """One request to Jev: state in, typed answers + probabilities out."""
@@ -77,7 +82,7 @@ def call_jev(state: str) -> dict:
 
 
 def triage(state: str) -> dict:
-    """Call Jev, then branch on its structured answers in plain code."""
+    """Call Jev, branch on its structured answers, and record the result."""
     result = call_jev(state)
     answers = result["answers"]
 
@@ -98,7 +103,7 @@ def triage(state: str) -> dict:
     else:
         priority = "P3"
 
-    return {
+    out = {
         "queue": queue,
         "auto_routed": auto_route,
         "priority": priority,
@@ -107,6 +112,8 @@ def triage(state: str) -> dict:
         "answers": answers,
         "usage": result.get("usage"),
     }
+    HISTORY.appendleft({"ts": time.time(), "message": state, "result": out})
+    return out
 
 
 def _mock_answers() -> dict:
@@ -151,6 +158,20 @@ def api_triage():
         return jsonify({"error": "TYPESAFE_API_KEY is not set (or set MOCK_JEV=1 to demo)."}), 500
 
 
+@app.get("/api/history")
+def api_history():
+    """Step back through previous queries: /api/history?offset=0 is the newest."""
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    total = len(HISTORY)
+    if total == 0:
+        return jsonify({"total": 0, "offset": 0, "item": None})
+    offset = min(offset, total - 1)
+    return jsonify({"total": total, "offset": offset, "item": HISTORY[offset]})
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -177,7 +198,9 @@ PAGE = r"""
   button { background:var(--blue); color:#fff; border:0; border-radius:8px; padding:11px 22px;
            font-size:15px; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
-  .sample { background:#fff; border:1px solid #d3ddef; color:var(--ink); font-weight:400; font-size:13px; }
+  .sample, .nav { background:#fff; border:1px solid #d3ddef; color:var(--ink); font-weight:400; font-size:13px; }
+  .nav { font-weight:600; }
+  .histinfo { font-size:13px; color:var(--muted); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:14px; margin-top:26px; }
   .card { background:#fff; border:1px solid #e1e8f5; border-radius:12px; padding:16px; }
   .card h3 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
@@ -203,6 +226,10 @@ PAGE = r"""
     <button class="sample" onclick="sample(0)">Sample: integration failure</button>
     <button class="sample" onclick="sample(1)">Sample: billing question</button>
     <button class="sample" onclick="sample(2)">Sample: angry outage</button>
+    <span style="flex:1"></span>
+    <button class="nav" id="prev" onclick="nav(1)">&#9664; Previous</button>
+    <button class="nav" id="next" onclick="nav(-1)" disabled>Next &#9654;</button>
+    <span class="histinfo" id="histinfo"></span>
   </div>
 
   <div id="out"></div>
@@ -214,7 +241,10 @@ const SAMPLES = [
   "Hello! Quick question — if I upgrade to the annual plan, is the discount applied to the seats I already pay for?",
   "This is the THIRD outage this month. My whole site is down AGAIN and support keeps ignoring me. Absolutely unacceptable."
 ];
-function sample(i){ document.getElementById('msg').value = SAMPLES[i]; }
+function sample(i){ document.getElementById('msg').value = SAMPLES[i]; histOffset = -1; updateNav(histTotal); }
+
+let histOffset = -1;   // -1 = live mode (not browsing history)
+let histTotal = 0;
 
 function bars(probs){
   return Object.entries(probs).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`
@@ -223,8 +253,46 @@ function bars(probs){
       <span>${Math.round(v*100)}%</span></div>`).join('');
 }
 
+function render(d, extraMeta){
+  const dep = d.answers.department, fr = d.answers.frustration, urg = d.answers.is_urgent;
+  document.getElementById('out').innerHTML = `
+    <div class="cards">
+      <div class="card"><h3>Queue</h3><div class="big">${d.queue}</div>
+        <span class="tag ${d.auto_routed?'ok':'warn'}">${d.auto_routed?'auto-routed':'needs human review'}</span>
+        <div class="bars">${bars(dep.probabilities)}</div>
+        <div class="meta">confidence ${Math.round(dep.confidence*100)}%</div></div>
+      <div class="card"><h3>Priority</h3><div class="big">${d.priority}</div>
+        <div class="meta">score ${d.priority_score}</div></div>
+      <div class="card"><h3>Frustration</h3>
+        <div class="big">${fr.legend ? fr.legend[String(fr.score)] ?? fr.score : fr.score}</div>
+        <div class="bars">${bars(fr.probabilities)}</div></div>
+      <div class="card"><h3>Urgent?</h3><div class="big">${Math.round(urg.noul*100)}%</div>
+        <div class="meta">Noul: probability the ticket is time-sensitive</div></div>
+    </div>
+    <div class="meta">model: ${d.model}${extraMeta || ''}</div>`;
+}
+
+function updateNav(total){
+  histTotal = total;
+  document.getElementById('prev').disabled = !(histOffset + 1 < histTotal || (histOffset === -1 && histTotal > 0));
+  document.getElementById('next').disabled = histOffset <= 0;
+  document.getElementById('histinfo').textContent = histOffset >= 0 ? `${histOffset + 1} of ${histTotal}` : '';
+}
+
+async function nav(step){
+  const target = histOffset === -1 ? 0 : histOffset + step;
+  const r = await fetch('/api/history?offset=' + target);
+  const d = await r.json();
+  if (!d.item){ updateNav(d.total); return; }
+  histOffset = d.offset;
+  document.getElementById('msg').value = d.item.message;
+  const when = new Date(d.item.ts * 1000).toLocaleString();
+  render(d.item.result, ` &middot; ${when}`);
+  updateNav(d.total);
+}
+
 async function run(){
-  const btn = document.getElementById('go'), out = document.getElementById('out');
+  const btn = document.getElementById('go');
   const message = document.getElementById('msg').value.trim();
   if(!message) return;
   btn.disabled = true; btn.textContent = 'Asking Jev...';
@@ -235,28 +303,19 @@ async function run(){
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if(!r.ok) throw new Error(d.error || 'Request failed');
-    const dep = d.answers.department, fr = d.answers.frustration, urg = d.answers.is_urgent;
-    out.innerHTML = `
-      <div class="cards">
-        <div class="card"><h3>Queue</h3><div class="big">${d.queue}</div>
-          <span class="tag ${d.auto_routed?'ok':'warn'}">${d.auto_routed?'auto-routed':'needs human review'}</span>
-          <div class="bars">${bars(dep.probabilities)}</div>
-          <div class="meta">confidence ${Math.round(dep.confidence*100)}%</div></div>
-        <div class="card"><h3>Priority</h3><div class="big">${d.priority}</div>
-          <div class="meta">score ${d.priority_score}</div></div>
-        <div class="card"><h3>Frustration</h3>
-          <div class="big">${fr.legend ? fr.legend[String(fr.score)] ?? fr.score : fr.score}</div>
-          <div class="bars">${bars(fr.probabilities)}</div></div>
-        <div class="card"><h3>Urgent?</h3><div class="big">${Math.round(urg.noul*100)}%</div>
-          <div class="meta">Noul: probability the ticket is time-sensitive</div></div>
-      </div>
-      <div class="meta">model: ${d.model} &middot; round-trip: ${ms}ms${d.usage ? ` &middot; ${d.usage.input_tokens} input tokens` : ''}</div>`;
+    histOffset = -1;
+    render(d, ` &middot; round-trip: ${ms}ms${d.usage ? ` &middot; ${d.usage.input_tokens} input tokens` : ''}`);
+    const h = await (await fetch('/api/history?offset=0')).json();
+    updateNav(h.total);
   }catch(e){
-    out.innerHTML = `<div class="err">${e.message}</div>`;
+    document.getElementById('out').innerHTML = `<div class="err">${e.message}</div>`;
   }finally{
     btn.disabled = false; btn.textContent = 'Triage ticket';
   }
 }
+
+// On load, show how much history exists.
+fetch('/api/history?offset=0').then(r=>r.json()).then(d=>updateNav(d.total));
 </script>
 </body>
 </html>

@@ -1,5 +1,7 @@
 # Jev Ticket Triage
 
+Browse previously triaged tickets with the Previous/Next buttons in the web UI, or via `GET /api/history?offset=N` (0 = newest; history is in-memory and resets on redeploy).
+
 A simple support-ticket triage app powered by [TypeSafe AI's Jev](https://typesafe.ai) — the new System One model that returns typed decisions with calibrated probabilities instead of generated text — deployed on DigitalOcean App Platform.
 
 Paste a customer message and one Jev call answers three typed questions in parallel:

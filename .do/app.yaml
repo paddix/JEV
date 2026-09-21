@@ -1,13 +1,12 @@
 # DigitalOcean App Platform spec for Jev Ticket Triage.
-# Replace the repo below with your GitHub repo, then create the app:
 #   doctl apps create --spec .do/app.yaml
-# or import this spec in the App Platform UI (Create App -> Edit App Spec).
+# or paste into the App Platform UI (app Settings -> App Spec -> Edit).
 name: jev-ticket-triage
 region: nyc
 services:
   - name: web
     github:
-      repo: YOUR_GITHUB_USERNAME/jev-ticket-triage
+      repo: paddix/JEV
       branch: main
       deploy_on_push: true
     environment_slug: python
@@ -21,7 +20,7 @@ services:
       - key: TYPESAFE_API_KEY
         scope: RUN_TIME
         type: SECRET
-        value: ""  # set in the App Platform UI or via doctl; stored encrypted
+        value: ""  # set in the App Platform UI; stored encrypted
       - key: JEV_MODEL
         scope: RUN_TIME
         value: jev-latest
