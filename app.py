@@ -154,8 +154,12 @@ def api_triage():
         return jsonify(triage(message))
     except requests.HTTPError as e:
         return jsonify({"error": f"Jev API error: {e.response.status_code} {e.response.text[:300]}"}), 502
+    except requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the Jev API: {e.__class__.__name__}: {e}"}), 502
     except KeyError:
         return jsonify({"error": "TYPESAFE_API_KEY is not set (or set MOCK_JEV=1 to demo)."}), 500
+    except Exception as e:  # last resort: always answer JSON, never an HTML error page
+        return jsonify({"error": f"Unexpected server error: {e.__class__.__name__}: {e}"}), 500
 
 
 @app.get("/api/history")
@@ -300,7 +304,10 @@ async function run(){
     const t0 = performance.now();
     const r = await fetch('/api/triage', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({message})});
-    const d = await r.json();
+    const raw = await r.text();
+    let d;
+    try { d = JSON.parse(raw); }
+    catch { throw new Error(`Server returned ${r.status}: ${raw.replace(/<[^>]*>/g,' ').trim().slice(0,200)}`); }
     const ms = Math.round(performance.now() - t0);
     if(!r.ok) throw new Error(d.error || 'Request failed');
     histOffset = -1;
