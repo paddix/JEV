@@ -75,7 +75,7 @@ def call_jev(state: str) -> dict:
             "Content-Type": "application/json",
         },
         json={"state": state, "model": JEV_MODEL, "questions": QUESTIONS},
-        timeout=30,
+        timeout=(5, 15),  # 5s to connect, 15s to respond — well under DO's gateway timeout
     )
     resp.raise_for_status()
     return resp.json()
