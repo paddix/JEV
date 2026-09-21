@@ -16,11 +16,10 @@ services:
     instance_size_slug: basic-xxs
     health_check:
       http_path: /healthz
+    # NOTE: TYPESAFE_API_KEY is intentionally NOT in this spec.
+    # It's set as an encrypted App-Level env var in the App Platform UI.
+    # Defining it here with a blank value would override the real key.
     envs:
-      - key: TYPESAFE_API_KEY
-        scope: RUN_TIME
-        type: SECRET
-        value: ""  # set in the App Platform UI; stored encrypted
       - key: JEV_MODEL
         scope: RUN_TIME
         value: jev-latest
