@@ -176,6 +176,59 @@ def api_history():
     return jsonify({"total": total, "offset": offset, "item": HISTORY[offset]})
 
 
+@app.get("/api/diag")
+def api_diag():
+    """Probe each step of the path to the Jev API from inside this container."""
+    import concurrent.futures
+    import socket
+
+    report = {}
+    key = os.environ.get("TYPESAFE_API_KEY", "")
+    report["env"] = {
+        "TYPESAFE_API_KEY": f"set ({len(key)} chars)" if key.strip() else "MISSING or blank",
+        "JEV_MODEL": JEV_MODEL,
+    }
+
+    # 1. DNS (getaddrinfo has no timeout of its own, so run it in a thread)
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(socket.getaddrinfo, "api.typesafe.ai", 443)
+        try:
+            infos = fut.result(timeout=4)
+            report["dns"] = {"ok": True, "ms": int((time.time() - t0) * 1000),
+                             "ips": sorted({i[4][0] for i in infos})}
+        except Exception as e:
+            report["dns"] = {"ok": False, "ms": int((time.time() - t0) * 1000),
+                             "error": f"{e.__class__.__name__}: {e}"}
+
+    # 2. TCP connect to port 443
+    t0 = time.time()
+    try:
+        with socket.create_connection(("api.typesafe.ai", 443), timeout=4):
+            report["tcp_443"] = {"ok": True, "ms": int((time.time() - t0) * 1000)}
+    except Exception as e:
+        report["tcp_443"] = {"ok": False, "ms": int((time.time() - t0) * 1000),
+                             "error": f"{e.__class__.__name__}: {e}"}
+
+    # 3. Real API call with a tiny question
+    t0 = time.time()
+    try:
+        r = requests.post(
+            JEV_API_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"state": "diag", "model": JEV_MODEL,
+                  "questions": {"u": {"type": "noul", "instructions": "Is this urgent?"}}},
+            timeout=(4, 10),
+        )
+        report["api_call"] = {"ok": r.ok, "ms": int((time.time() - t0) * 1000),
+                              "status": r.status_code, "body": r.text[:200]}
+    except Exception as e:
+        report["api_call"] = {"ok": False, "ms": int((time.time() - t0) * 1000),
+                              "error": f"{e.__class__.__name__}: {e}"}
+
+    return jsonify(report)
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
